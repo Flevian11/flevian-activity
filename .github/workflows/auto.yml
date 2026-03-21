@@ -2,7 +2,7 @@ name: Auto Activity Engine
 
 on:
   schedule:
-    - cron: "0 6 * * *"
+    - cron: "0 6 * * *"   # runs daily at 6AM UTC
   workflow_dispatch:
 
 jobs:
@@ -12,6 +12,8 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Update auto.json
         run: |
@@ -20,6 +22,9 @@ jobs:
           if [ ! -f auto.json ]; then
             echo "{\"updates\": []}" > auto.json
           fi
+
+          sudo apt-get update
+          sudo apt-get install -y jq
 
           jq --arg time "$TIMESTAMP" '.updates += [$time] | .last_update=$time' auto.json > tmp.json
           mv tmp.json auto.json
@@ -30,5 +35,10 @@ jobs:
           git config user.email "flevianochoka19@gmail.com"
 
           git add auto.json
-          git commit -m "auto: daily activity update" || echo "No changes"
-          git push
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "auto: daily activity update"
+            git push
+          fi
