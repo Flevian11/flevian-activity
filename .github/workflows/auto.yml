@@ -1,0 +1,34 @@
+name: Auto Activity Engine
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Update auto.json
+        run: |
+          TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S")
+
+          if [ ! -f auto.json ]; then
+            echo "{\"updates\": []}" > auto.json
+          fi
+
+          jq --arg time "$TIMESTAMP" '.updates += [$time] | .last_update=$time' auto.json > tmp.json
+          mv tmp.json auto.json
+
+      - name: Commit changes
+        run: |
+          git config user.name "Flevian11"
+          git config user.email "flevianochoka19@gmail.com"
+
+          git add auto.json
+          git commit -m "auto: daily activity update" || echo "No changes"
+          git push
