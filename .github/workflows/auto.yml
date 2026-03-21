@@ -2,8 +2,14 @@ name: Auto Activity Engine
 
 on:
   schedule:
-    - cron: "0 6 * * *"   # runs daily at 6AM UTC
+    - cron: "0 6 * * *"
+    - cron: "0 10 * * *"
+    - cron: "0 14 * * *"
+    - cron: "0 18 * * *"
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   update:
@@ -23,7 +29,7 @@ jobs:
             echo "{\"updates\": []}" > auto.json
           fi
 
-          sudo apt-get update
+          sudo apt-get update -y
           sudo apt-get install -y jq
 
           jq --arg time "$TIMESTAMP" '.updates += [$time] | .last_update=$time' auto.json > tmp.json
@@ -39,6 +45,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "auto: daily activity update"
+            git commit -m "auto: activity update $(date -u +'%H:%M')"
             git push
           fi
