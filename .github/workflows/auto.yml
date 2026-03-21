@@ -1,4 +1,4 @@
-name: Auto Activity Engine
+name: Smart Activity Engine
 
 on:
   schedule:
@@ -21,6 +21,13 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      # 🎲 RANDOM DELAY (0–20 minutes)
+      - name: Random delay
+        run: |
+          DELAY=$((RANDOM % 1200))
+          echo "Sleeping for $DELAY seconds..."
+          sleep $DELAY
+
       - name: Update auto.json
         run: |
           TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S")
@@ -35,6 +42,7 @@ jobs:
           jq --arg time "$TIMESTAMP" '.updates += [$time] | .last_update=$time' auto.json > tmp.json
           mv tmp.json auto.json
 
+      # 💬 RANDOM COMMIT MESSAGE
       - name: Commit changes
         run: |
           git config user.name "Flevian11"
@@ -42,9 +50,22 @@ jobs:
 
           git add auto.json
 
+          messages=(
+            "refactor: improve structure"
+            "feat: update internal data"
+            "chore: minor adjustments"
+            "fix: small improvements"
+            "docs: update records"
+            "perf: optimize flow"
+            "style: cleanup"
+            "build: update data pipeline"
+          )
+
+          MSG=${messages[$RANDOM % ${#messages[@]}]}
+
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "auto: activity update $(date -u +'%H:%M')"
+            git commit -m "$MSG ($(date -u +'%H:%M'))"
             git push
           fi
