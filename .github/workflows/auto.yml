@@ -2,10 +2,7 @@ name: Smart Activity Engine
 
 on:
   schedule:
-    - cron: "0 6 * * *"
-    - cron: "0 10 * * *"
-    - cron: "0 14 * * *"
-    - cron: "0 18 * * *"
+    - cron: "0 * * * *"   # runs every hour
   workflow_dispatch:
 
 permissions:
@@ -21,16 +18,17 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      # 🎲 RANDOM DELAY (0–20 minutes)
+      # 🎲 RANDOM DELAY (0–30 min)
       - name: Random delay
         run: |
-          DELAY=$((RANDOM % 1200))
+          DELAY=$((RANDOM % 1800))
           echo "Sleeping for $DELAY seconds..."
           sleep $DELAY
 
-      - name: Update auto.json
+      - name: Decide whether to commit
+        id: decision
         run: |
-          TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S")
+          TODAY=$(date -u +"%Y-%m-%d")
 
           if [ ! -f auto.json ]; then
             echo "{\"updates\": []}" > auto.json
@@ -39,11 +37,38 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y jq
 
+          COUNT=$(jq --arg today "$TODAY" '[.updates[] | select(startswith($today))] | length' auto.json)
+
+          echo "Today's commits: $COUNT"
+
+          # 🎯 MIN 6, MAX 15
+          if [ "$COUNT" -ge 15 ]; then
+            echo "should_commit=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Random chance (about 50%)
+          CHANCE=$((RANDOM % 100))
+
+          if [ "$COUNT" -lt 6 ]; then
+            # Force commits until minimum reached
+            echo "should_commit=true" >> $GITHUB_OUTPUT
+          elif [ "$CHANCE" -lt 50 ]; then
+            echo "should_commit=true" >> $GITHUB_OUTPUT
+          else
+            echo "should_commit=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update auto.json
+        if: steps.decision.outputs.should_commit == 'true'
+        run: |
+          TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S")
+
           jq --arg time "$TIMESTAMP" '.updates += [$time] | .last_update=$time' auto.json > tmp.json
           mv tmp.json auto.json
 
-      # 💬 RANDOM COMMIT MESSAGE
       - name: Commit changes
+        if: steps.decision.outputs.should_commit == 'true'
         run: |
           git config user.name "Flevian11"
           git config user.email "flevianochoka19@gmail.com"
@@ -63,9 +88,5 @@ jobs:
 
           MSG=${messages[$RANDOM % ${#messages[@]}]}
 
-          if git diff --cached --quiet; then
-            echo "No changes to commit"
-          else
-            git commit -m "$MSG ($(date -u +'%H:%M'))"
-            git push
-          fi
+          git commit -m "$MSG ($(date -u +'%H:%M'))"
+          git push
