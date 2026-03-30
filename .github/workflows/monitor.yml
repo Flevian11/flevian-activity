@@ -1,0 +1,119 @@
+name: Activity Monitor & Health Check
+
+on:
+  schedule:
+    - cron: "0 */4 * * *"  # Every 4 hours
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    
+    steps:
+      - name: Checkout activity repo
+        uses: actions/checkout@v4
+        with:
+          repository: Flevian11/flevian-activity
+          token: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: Check activity health
+        id: health_check
+        run: |
+          # Fetch current status
+          LAST_UPDATE=$(jq -r '.last_update' auto.json 2>/dev/null || echo "1970-01-01 00:00:00")
+          TOTAL_COMMITS=$(jq '.stats.total_commits' auto.json 2>/dev/null || echo 0)
+          TODAY_COUNT=$(jq '.stats.daily_count' auto.json 2>/dev/null || echo 0)
+          
+          # Calculate time since last update
+          LAST_UPDATE_EPOCH=$(date -d "$LAST_UPDATE" +%s 2>/dev/null || echo 0)
+          CURRENT_EPOCH=$(date +%s)
+          DIFF=$((CURRENT_EPOCH - LAST_UPDATE_EPOCH))
+          HOURS_SINCE=$((DIFF / 3600))
+          
+          echo "📊 Activity Health Report"
+          echo "========================="
+          echo "Last update: $LAST_UPDATE"
+          echo "Hours since: $HOURS_SINCE"
+          echo "Total commits: $TOTAL_COMMITS"
+          echo "Today's activity: $TODAY_COUNT"
+          echo ""
+          
+          # Check for anomalies
+          ISSUES=()
+          
+          if [ $HOURS_SINCE -gt 4 ]; then
+            ISSUES+=("⚠️ No activity for $HOURS_SINCE hours")
+          fi
+          
+          if [ $TOTAL_COMMITS -eq 0 ]; then
+            ISSUES+=("⚠️ No commit history found")
+          fi
+          
+          # Output for GitHub Actions
+          echo "hours_since=$HOURS_SINCE" >> $GITHUB_OUTPUT
+          echo "last_update=$LAST_UPDATE" >> $GITHUB_OUTPUT
+          echo "issues_count=${#ISSUES[@]}" >> $GITHUB_OUTPUT
+          
+          # Create report
+          {
+            echo "## Activity Health Report - $(date -u)"
+            echo ""
+            echo "| Metric | Value |"
+            echo "|--------|-------|"
+            echo "| Last Update | $LAST_UPDATE |"
+            echo "| Hours Since | $HOURS_SINCE |"
+            echo "| Total Commits | $TOTAL_COMMITS |"
+            echo "| Today's Activity | $TODAY_COUNT |"
+            echo ""
+            if [ ${#ISSUES[@]} -gt 0 ]; then
+              echo "### ⚠️ Issues Detected"
+              for issue in "${ISSUES[@]}"; do
+                echo "- $issue"
+              done
+            else
+              echo "### ✅ System Healthy"
+            fi
+          } > health_report.md
+          
+      - name: Auto-repair activity engine
+        if: steps.health_check.outputs.hours_since > 4
+        run: |
+          echo "🔄 Triggering activity engine repair..."
+          
+          # Force trigger the activity workflow
+          curl -X POST \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/Flevian11/flevian-activity/actions/workflows/auto.yml/dispatches \
+            -d '{"ref":"main","inputs":{"force":"true"}}'
+          
+          echo "✅ Activity engine triggered for recovery"
+          
+      - name: Commit health report
+        run: |
+          git config user.name "Flevian11"
+          git config user.email "flevianochoka19@gmail.com"
+          
+          mkdir -p .reports
+          mv health_report.md .reports/health_$(date -u +"%Y%m%d_%H%M%S").md
+          
+          # Keep only last 30 reports
+          cd .reports
+          ls -t | tail -n +31 | xargs -r rm
+          cd ..
+          
+          git add .reports/
+          git commit -m "📊 Update health report - $(date -u +'%Y-%m-%d %H:%M')" || true
+          git push --force-with-lease || true
+          
+      - name: Send notification (if issues)
+        if: steps.health_check.outputs.issues_count > 0
+        run: |
+          echo "⚠️ Activity engine needs attention!"
+          echo "Issues detected: ${{ steps.health_check.outputs.issues_count }}"
+          # Add your notification method here (Slack, Discord, etc.)
