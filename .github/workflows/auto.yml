@@ -2,180 +2,177 @@ name: Smart Activity Engine
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # runs every 30 minutes (more frequent)
+    - cron: "*/30 * * * *"
   workflow_dispatch:
+    inputs:
+      force:
+        description: "Force one activity update"
+        required: false
+        default: "false"
   push:
     paths:
-      - 'auto.json'  # Trigger on manual changes
+      - "auto.json"
 
 permissions:
   contents: write
 
+concurrency:
+  group: activity-engine-main
+  cancel-in-progress: false
+
 jobs:
   update:
     runs-on: ubuntu-latest
-    timeout-minutes: 10  # Prevent stuck jobs
+    timeout-minutes: 5
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4  # Updated to v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          fetch-depth: 1  # Only fetch latest commit for speed
+          fetch-depth: 1
 
-      # 🎲 RANDOM DELAY (0–15 min) - reduced for better responsiveness
-      - name: Random delay
-        run: |
-          DELAY=$((RANDOM % 900))
-          echo "🕐 Sleeping for $DELAY seconds..."
-          sleep $DELAY
-
-      - name: Setup tools
+      - name: Setup jq
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y jq
 
-      - name: Analyze activity patterns
+      - name: Analyze activity
         id: decision
+        shell: bash
+        env:
+          FORCE: ${{ inputs.force || 'false' }}
         run: |
-          TODAY=$(date -u +"%Y-%m-%d")
-          HOUR=$(date -u +"%H")
+          set -euo pipefail
 
-          # Initialize file if missing
+          TODAY="$(date -u +'%Y-%m-%d')"
+          HOUR="$(date -u +'%H')"
+
           if [ ! -f auto.json ]; then
-            echo '{"updates": [], "last_update": "", "stats": {"daily_count": 0, "weekly_total": 0}}' > auto.json
+            printf '%s\n' \
+              '{"updates":[],"last_update":"","stats":{"daily_count":0,"weekly_total":0}}' \
+              > auto.json
           fi
 
-          # Count today's updates
-          COUNT=$(jq --arg today "$TODAY" '[.updates[] | select(startswith($today))] | length' auto.json)
-          
-          # Calculate recent activity (last 24h)
-          RECENT=$(jq --arg today "$TODAY" '[.updates[] | select(. > ($today + " 00:00:00"))] | length' auto.json)
+          jq empty auto.json
 
-          echo "📊 Today's commits: $COUNT"
-          echo "🕒 Recent commits (24h): $RECENT"
+          COUNT="$(jq --arg today "$TODAY" \
+            '[.updates[] | select(startswith($today))] | length' auto.json)"
 
-          # Dynamic thresholds based on time of day
-          # Less activity during night hours (UTC)
+          echo "Today's activity: $COUNT"
+
+          if [ "$FORCE" = "true" ]; then
+            echo "should_commit=true" >> "$GITHUB_OUTPUT"
+            echo "reason=Manual health recovery" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           if [ "$HOUR" -lt 6 ] || [ "$HOUR" -gt 22 ]; then
             MIN_ACTIVITY=2
             MAX_ACTIVITY=8
-            PROBABILITY=40
           else
             MIN_ACTIVITY=6
             MAX_ACTIVITY=15
-            PROBABILITY=60
           fi
 
-          echo "🎯 Target range: $MIN_ACTIVITY-$MAX_ACTIVITY"
-
-          # Decision logic
           if [ "$COUNT" -ge "$MAX_ACTIVITY" ]; then
-            echo "❌ Maximum reached ($MAX_ACTIVITY) - skipping"
-            echo "should_commit=false" >> $GITHUB_OUTPUT
-            echo "reason=Maximum activity reached" >> $GITHUB_OUTPUT
+            echo "should_commit=false" >> "$GITHUB_OUTPUT"
+            echo "reason=Daily maximum reached ($MAX_ACTIVITY)" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           if [ "$COUNT" -lt "$MIN_ACTIVITY" ]; then
-            echo "✅ Below minimum ($MIN_ACTIVITY) - forcing commit"
-            echo "should_commit=true" >> $GITHUB_OUTPUT
-            echo "reason=Below minimum threshold" >> $GITHUB_OUTPUT
+            echo "should_commit=true" >> "$GITHUB_OUTPUT"
+            echo "reason=Below minimum activity ($MIN_ACTIVITY)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          RANGE=$((MAX_ACTIVITY - MIN_ACTIVITY))
+          POSITION=$((COUNT - MIN_ACTIVITY))
+          PROBABILITY=$((60 - (POSITION * 30 / RANGE)))
+
+          [ "$PROBABILITY" -lt 20 ] && PROBABILITY=20
+
+          CHANCE=$((RANDOM % 100))
+
+          if [ "$CHANCE" -lt "$PROBABILITY" ]; then
+            echo "should_commit=true" >> "$GITHUB_OUTPUT"
+            echo "reason=Probability ${PROBABILITY}%" >> "$GITHUB_OUTPUT"
           else
-            # Dynamic probability based on current count
-            # Higher probability when closer to min, lower when closer to max
-            RANGE=$((MAX_ACTIVITY - MIN_ACTIVITY))
-            POSITION=$((COUNT - MIN_ACTIVITY))
-            if [ "$RANGE" -gt 0 ]; then
-              PROBABILITY=$((60 - (POSITION * 30 / RANGE)))
-              [ "$PROBABILITY" -lt 20 ] && PROBABILITY=20
-            fi
-            
-            CHANCE=$((RANDOM % 100))
-            if [ "$CHANCE" -lt "$PROBABILITY" ]; then
-              echo "✅ Random chance ($PROBABILITY%) - committing"
-              echo "should_commit=true" >> $GITHUB_OUTPUT
-              echo "reason=Random probability" >> $GITHUB_OUTPUT
-            else
-              echo "❌ Random chance ($PROBABILITY%) - skipping"
-              echo "should_commit=false" >> $GITHUB_OUTPUT
-              echo "reason=Probability not met" >> $GITHUB_OUTPUT
-            fi
+            echo "should_commit=false" >> "$GITHUB_OUTPUT"
+            echo "reason=Probability not met (${PROBABILITY}%)" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Update activity data
         if: steps.decision.outputs.should_commit == 'true'
+        shell: bash
         run: |
-          TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S")
-          
-          # Update JSON with new timestamp and statistics
-          jq --arg time "$TIMESTAMP" \
-             '.updates += [$time] | .last_update=$time | 
-              .stats.daily_count = ([.updates[] | select(startswith($time[:10]))] | length) |
-              .stats.weekly_total = ([.updates[] | select(. > (now - 7*24*3600 | strftime("%Y-%m-%d"))) ] | length)' \
-             auto.json > tmp.json
-          
-          mv tmp.json auto.json
-          
-          echo "✅ Updated auto.json with timestamp: $TIMESTAMP"
-          echo "📈 Daily count: $(jq '.stats.daily_count' auto.json)"
+          set -euo pipefail
+
+          TIMESTAMP="$(date -u +'%Y-%m-%d %H:%M:%S')"
+
+          jq --arg time "$TIMESTAMP" '
+            .updates = ((.updates // []) + [$time])
+            | .last_update = $time
+            | .stats.daily_count =
+                ([.updates[] | select(startswith($time[:10]))] | length)
+            | .stats.weekly_total =
+                ([.updates[]
+                  | select(. >= (($time | strptime("%Y-%m-%d %H:%M:%S") | mktime) - 604800 | strftime("%Y-%m-%d %H:%M:%S")))
+                ] | length)
+          ' auto.json > auto.json.tmp
+
+          mv auto.json.tmp auto.json
+
+          jq empty auto.json
+
+          echo "Activity recorded: $TIMESTAMP"
+          echo "Daily count: $(jq '.stats.daily_count' auto.json)"
+          echo "Weekly count: $(jq '.stats.weekly_total' auto.json)"
 
       - name: Generate activity summary
         if: steps.decision.outputs.should_commit == 'true'
+        shell: bash
         run: |
-          # Create a nice summary file for README
-          cat > activity_summary.md << 'EOF'
+          set -euo pipefail
+
+          TODAY_COUNT="$(jq '.stats.daily_count' auto.json)"
+          WEEKLY_COUNT="$(jq '.stats.weekly_total' auto.json)"
+          LAST_UPDATE="$(jq -r '.last_update' auto.json)"
+
+          cat > activity_summary.md << EOF
           ## 📊 Recent Activity
-          
+
           | Period | Commits |
           |--------|---------|
-          EOF
-          
-          # Add today's count
-          TODAY_COUNT=$(jq '.stats.daily_count' auto.json)
-          echo "| Today | $TODAY_COUNT |" >> activity_summary.md
-          
-          # Add weekly total
-          WEEKLY=$(jq '.stats.weekly_total' auto.json)
-          echo "| This Week | $WEEKLY |" >> activity_summary.md
-          
-          echo "" >> activity_summary.md
-          echo "**Last Updated:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> activity_summary.md
+          | Today | ${TODAY_COUNT} |
+          | This Week | ${WEEKLY_COUNT} |
 
-      - name: Commit changes
+          **Last Updated:** ${LAST_UPDATE} UTC
+          EOF
+
+      - name: Commit activity update
         if: steps.decision.outputs.should_commit == 'true'
+        shell: bash
         run: |
+          set -euo pipefail
+
           git config user.name "Flevian11"
           git config user.email "flevianochoka19@gmail.com"
 
-          git add auto.json activity_summary.md 2>/dev/null || true
+          git add auto.json activity_summary.md
 
-          # Dynamic commit messages with more variety
-          messages=(
-            "🔄 chore: update activity records"
-            "✨ feat: record new activity timestamp"
-            "📊 stats: update contribution data"
-            "🤖 auto: refresh activity metrics"
-            "📈 analytics: log system activity"
-            "⚡ perf: update engagement data"
-            "🎯 tracking: record development activity"
-            "🔧 config: update automation records"
-            "📝 docs: refresh activity log"
-            "💪 feat: increase contribution consistency"
-          )
+          if git diff --cached --quiet; then
+            echo "No activity changes."
+            exit 0
+          fi
 
-          # Use timestamp for seed
-          SEED=$(date +%s)
-          MSG=${messages[$((SEED % ${#messages[@]}))]}
-
-          git commit -m "$MSG ($(date -u +'%H:%M UTC'))"
-          git push --force-with-lease  # Safer push
+          git commit -m "chore: update activity data"
+          git push
 
       - name: Log outcome
+        shell: bash
         run: |
-          echo "## Activity Check - $(date -u)" >> $GITHUB_STEP_SUMMARY
-          echo "- **Decision:** ${{ steps.decision.outputs.should_commit }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Reason:** ${{ steps.decision.outputs.reason }}" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ steps.decision.outputs.should_commit }}" == "true" ]; then
-            echo "- **Timestamp:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> $GITHUB_STEP_SUMMARY
-          fi
+          echo "## Activity Check - $(date -u)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Decision: ${{ steps.decision.outputs.should_commit }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Reason: ${{ steps.decision.outputs.reason }}" >> "$GITHUB_STEP_SUMMARY"
